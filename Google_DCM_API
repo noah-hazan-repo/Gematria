@@ -1,0 +1,207 @@
+
+from airflow import DAG
+from airflow import models
+from airflow.operators.dummy_operator import DummyOperator
+from airflow.operators.python_operator import PythonOperator
+from airflow.exceptions import AirflowSkipException
+from airflow.models import TaskInstance
+import httplib2
+import shutil
+import requests
+import sys
+from googleapiclient import discovery, http
+from google.oauth2 import service_account
+from google.oauth2.credentials import Credentials
+#### get credentials SOMEHOW
+from io import FileIO
+import csv
+from google.cloud import storage,bigquery
+# std lib imports
+import json
+import os
+import warnings
+import pandas as pd
+import logging
+import time
+from datetime import date, datetime, timedelta
+import pandas as pd
+from google.cloud import bigquery as bq
+from google.oauth2 import service_account
+from googleapiclient import discovery
+
+class CampaignManagerReport:
+    
+    api_name = 'dfareporting'
+    api_version = 'v3.3'
+    api_scopes = ['https://www.googleapis.com/auth/dfareporting',
+                  'https://www.googleapis.com/auth/dfatrafficking',  
+                  'https://www.googleapis.com/auth/ddmconversions']
+    
+    def __init__(self,creds,profile_id,report_id):
+        self.profile_id = profile_id
+        self.report_id = report_id        
+        scoped_creds = creds.with_scopes(self.api_scopes)
+        self.service = discovery.build(self.api_name, self.api_version, credentials=scoped_creds,cache_discovery=False)
+           
+    def get_report(self):
+        request = self.service.reports().get(profileId=self.profile_id,reportId=self.report_id)
+        resp = request.execute()
+        self.report = resp
+        self.name = resp['name']
+        if self.report['type']  == "FLOODLIGHT":
+            self.date_range = resp['floodlightCriteria']['dateRange']
+        else:
+            self.date_range = resp['criteria']['dateRange']
+    
+    def get_last_file(self):
+        request = self.service.reports().files().list(profileId=self.profile_id,reportId=self.report_id,maxResults=1)
+        resp = request.execute()
+        
+        try:
+            self.file = resp['items'][0]
+            return resp['items'][0]
+        except:
+            self.file = None
+            return None
+    
+    def run_report(self):
+        request = self.service.reports().run(profileId=self.profile_id,reportId=self.report_id)
+        resp = request.execute()
+        self.file = resp        
+    
+    def patch_report(self):
+        request = self.service.reports().update(profileId=self.profile_id,reportId=self.report_id, body=self.report)
+        resp = request.execute()
+        self.get_report()
+        
+        
+    def set_date_range(self,start_date,end_date):
+        if self.report['type']  == "FLOODLIGHT":
+            self.report['floodlightCriteria']['dateRange'] = {"startDate":start_date,"endDate":end_date,"relativeDateRange":None}        
+            self.patch_report()
+        else:
+            self.report['criteria']['dateRange'] = {"startDate":start_date,"endDate":end_date,"relativeDateRange":None}        
+            self.patch_report()
+        
+    def get_report_status(self):
+        request = self.service.files().get(reportId=self.report_id,fileId=self.file['id'])
+        resp = request.execute()
+        self.file = resp
+        self.status = self.file['status']
+        return self.status
+    
+    
+    def download_file(self, folder_name = "/home/airflow/gcs/dags/RTF/brand_reporting/sql"):
+        CHUNK_SIZE = 32 * 1024 * 1024
+        request = self.service.files().get(reportId=self.report_id,fileId=self.file['id'])
+        report_file = request.execute()
+
+        file_name = report_file['fileName'] or report_file['id']
+
+        if report_file['format'] == 'CSV': 
+            extension = '.csv' 
+        else: 
+            extension = '.xml'
+
+        file_name = file_name + extension
+
+        if report_file['status'] == 'REPORT_AVAILABLE':
+            out_file = FileIO(file_name, mode='wb')
+
+            request = self.service.files().get_media(reportId=self.report_id, fileId=self.file['id'])
+
+            downloader = http.MediaIoBaseDownload(out_file, request,
+                                                chunksize=CHUNK_SIZE)
+
+            download_finished = False
+
+            while download_finished is False:
+                _, download_finished = downloader.next_chunk()
+        self.file_name = file_name
+        
+        for file in os.listdir("/mnt/"):
+            if file.endswith(self.file_name):
+                print(file)
+                shutil.copy(file, folder_name)
+        
+        return file_name
+
+def clean_dcm_file(filename):
+    data = []
+    write = False
+    with open(filename,'r') as f:
+        reader = csv.reader(f, delimiter=',')
+
+        for row in reader:
+            if write == True:
+                data.append(row)        
+            elif row == ['Report Fields']:
+                write = True
+
+        if data[-1][0] == 'Grand Total:':
+            data.pop()
+
+    with open(filename, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerows(data)
+        
+        
+def run_dcm(report_types, cadence = "weekly"):
+    downloaded_reports = []
+    for ids in report_types:
+        for id in ids:
+            if cadence == "weekly":
+                last_monday = date.today() 
+                end_date = last_monday - timedelta(1)
+                start_date = end_date - timedelta(days=6)
+            if cadence == "three_days":
+                end_date = date.today() - timedelta(1)
+                start_date = end_date - timedelta(days = 2)
+            report = CampaignManagerReport(credentialsFromVault,profile_id = 5096586,report_id = id)
+            print("getting")
+            report.get_report()
+            report.get_last_file()
+            print("setting")
+            report.set_date_range(str(start_date),str(end_date)) 
+            print("running")
+            status = report.run_report()
+            status = report.get_report_status()
+            print(status)
+            count = 0
+            while status != "REPORT_AVAILABLE":
+                time.sleep(1)
+                count += 1
+                status = report.get_report_status()
+            downloaded_reports.append(report.download_file())
+            print("report appended")
+            
+            
+def try_loading_file(schema, table_id):
+    try:
+        job_config = bigquery.LoadJobConfig(
+        source_format=bigquery.SourceFormat.CSV, skip_leading_rows=1, schema=schema, write_disposition = "WRITE_TRUNCATE"
+        )
+        with open(file, "rb") as source_file:
+            job = client.load_table_from_file(source_file, table_id, job_config=job_config)
+
+            job.result()  # Waits for the job to complete.
+
+            table = client.get_table(table_id)  # Make an API request.
+
+            print(
+            "Loaded {} rows and {} columns to {}".format(
+            table.num_rows, len(table.schema), table_id
+            )
+            )
+            return True
+    except Exception as e: 
+        print("trying another schema!")
+        
+        
+def detect_type(filename):
+    date_today = str(date.today()).replace("-","")
+    if "Geo" in filename : return f"project.dataset.DCM_Geo_{date_today}"
+    if "Class" in filename : return f"project.dataset.DWH_Landing.DCM_Classification_{date_today}"
+    if "Place" in filename : return f"project.dataset.DWH_Landing.DCM_Placement_{date_today}"
+    if "Player" in filename : return f"project.dataset.DWH_Landing.DCM_Player_{date_today}"
+    if "Conversions" in filename : return f"project.dataset.DWH_Landing.CM_conversions_{date_today}"
