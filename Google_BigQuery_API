@@ -1,0 +1,173 @@
+################### Define Helper Functions ################### 
+ 
+from datetime import datetime, timezone, timedelta
+from google.cloud import storage, bigquery
+from google.cloud.bigquery import Table
+import pandas as pd
+import time
+import csv
+import os
+from google.oauth2.credentials import Credentials
+# GET CREDENTIALS SOMEHOW
+ 
+def get_blobs(origin_bucket, prefix, creds):
+    storage_client = storage.Client(credentials = creds)
+    bucket = storage_client.get_bucket(origin_bucket)
+    getting_blobs = bucket.list_blobs(prefix=prefix) # Get list of files
+    blobs = []
+    for blob in getting_blobs:
+        blobs.append(blob)
+    if len(blobs) >=1:
+        print(f"There are {len(blobs)} blobs in {origin_bucket} matching {prefix}")
+        return blobs
+    else:
+        print("there are no blobs")
+        
+        
+def blob_extant_since(blobs, minutes_ago):
+    end_interval = datetime.now(timezone.utc)
+    start_interval = end_interval - timedelta(minutes=minutes_ago)
+    blob_name = blobs.name
+    time_updated = blobs.updated
+    if time_updated < start_interval:
+        print(f"{blob_name} was last updated at {time_updated} but start interval is at {start_interval}")
+        return False
+    print(f"{blob_name} was last updated at {time_updated} which is within the past {minutes_ago} minutes")
+    return True  
+    
+    
+def blob_to_df(blobs):
+    filename = blobs.name.replace('/', '_') 
+    print(blobs)
+    print(filename)
+    blobs.download_to_filename(filename)  # Download
+    print("downloaded")
+    df = pd.read_csv(filename)
+    print("in df now")
+    for column in df.columns:
+        string_chunk = column[0:7]
+        if string_chunk == "Unnamed":
+            del df[column]
+            print('deleted unnamed column')
+    return df
+ 
+def check_blob_shape(blobs, expected_columns):
+    df = blob_to_df(blobs)
+    shape = df.shape
+    if shape[1] == expected_columns:
+        print(f"{blob.name} has the correct dimensions.")
+        return True
+    else:
+        print(f"{blob.name} has the wrong dimensions. Expected {expected_columns} columns, got {shape[1]}.")
+        return False
+        
+        
+def move_blob_to_gcs(blobs, credentialsFromVault, destination_bucket, destination_name):
+    storage_client = storage.Client(credentials = credentialsFromVault)
+    destination_bucket = storage_client.get_bucket(destination_bucket)
+    destination_bucket.copy_blob(blob, destination_bucket, destination_name)
+    print(f"Copied {blob.name} to {destination_bucket}")
+    
+    
+def move_blob_to_bq(blobs, bq_project, bq_dataset, bq_schema, export_bucket):
+    client = bigquery.Client(project = bq_project, credentials = credentialsFromVault)
+    dataset_id = bq_dataset
+    dataset_ref = client.dataset(bq_dataset)
+    if ".csv" in blob.name:
+        table_name = blob.name.replace('.csv','')
+    job_config = bigquery.LoadJobConfig()
+    job_config.schema = bq_schema
+    job_config.write_disposition  = 'WRITE_TRUNCATE'
+    job_config.skip_leading_rows = 1
+    job_config.allow_quoted_newlines = True
+    job_config.source_format = bigquery.SourceFormat.CSV
+    uri = f"gs://{export_bucket}/{blob.name}" 
+    load_job = client.load_table_from_uri(uri, dataset_ref.table(table_name), job_config=job_config)  
+    print(f"Starting job {table_name} from {export_bucket}")
+    load_job.result()  # Waits for table load to complete.
+    print("Job finished.")
+    destination_table = client.get_table(dataset_ref.table(table_name))
+    print("Loaded {} rows.".format(destination_table.num_rows))
+    
+    
+def consolidate(consolidation_dict, SQL):
+    client = bigquery.Client(project = 'essence-rtf-goog-dwh')
+    for origin, destination in consolidation_dict.items():
+        print(origin, "is consolidating into", destination)
+        job_config = bigquery.QueryJobConfig()
+        job_config.write_disposition = bigquery.WriteDisposition.WRITE_TRUNCATE
+        job_config.destination = destination
+        sql = SQL
+        query_job = client.query(
+            sql,
+            location="US",
+            job_config=job_config,
+        )  
+        result = query_job.result() # Waits for the query to finish
+        print(result)
+        
+        
+def orchestrate(list_of_tuples):
+    for process in list_of_tuples:
+        origin, destination = process
+        query = f"select * from {origin}"
+        consolidate({ origin : destination }, query)
+        
+ 
+        
+        
+#### Typically, DEFINE SCHEMAS AT THIS POINT
+
+
+    
+################### Setup and Send Job ###################
+ 
+ 
+project = ''
+origin_bucket = ''
+prefix = ''
+credentialsFromVault = None
+minutes_ago = 1
+columns_expected = 0
+export_bucket = ''
+bq_dataset = ''
+bq_schema = None
+ 
+ 
+blobs = get_blobs(origin_bucket, prefix, credentialsFromVault)
+ 
+for blob in blobs:
+    blob_extant_since(blob, minutes_ago)
+    check_blob_shape(blob, columns_expected)
+    move_blob_to_gcs(blob, credentialsFromVault, export_bucket, blob.name)
+    move_blob_to_bq(blob, project, bq_dataset, bq_schema, export_bucket)
+ 
+   
+ 
+################### Consolidate All Models To Production  ###################
+ 
+    
+client = bigquery.Client(credentials = credentialsFromVault)
+ 
+ 
+to_stage = {"project.dataset.table_view" : "project.dataset.table_prod" }
+to_prod = {"project.dataset.table_view" : "project.dataset.table_prod" }
+
+ 
+origins_and_destinations = [
+    to_stage, to_prod
+]
+ 
+for dictionary in origins_and_destinations:
+    for origin_table_id, destination_table_id in dictionary.items():
+        dest = Table.from_string(destination_table_id)
+        job_configuration = bigquery.job.QueryJobConfig(destination=dest,write_disposition="WRITE_TRUNCATE")
+        sql = f"select * from {origin_table_id}"
+        query_job = client.query(sql, job_config=job_configuration )  # Make an API request.
+        query_job.result()  # Wait for the job to complete.
+        print("Query results loaded to the table {}".format(destination_table_id))
+    
+    
+for path in os.listdir():
+    if path.endswith(".csv") or path.endswith(".xlsx"):
+        os.remove(path)
