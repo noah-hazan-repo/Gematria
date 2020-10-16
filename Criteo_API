@@ -1,0 +1,564 @@
+import requests
+import logging
+import os
+import time
+import base64
+import re
+import pandas as pd
+from google.cloud import storage, bigquery
+import time
+import datetime
+import pandas as pd
+import re
+import os
+import sys
+ 
+from google.oauth2.credentials import Credentials
+
+# get credentials somehow
+    
+def df_to_bq(table_name, bq_append_string, criteo_files, dataset_id, destination_table_name, pd_schema, bq_schema):
+    for path in criteo_files:
+        dataframe = pd.read_csv(path, dtype=pd_schema)
+        dataframe.rename(columns=lambda x: x.strip(), inplace=True)
+        dataframe.rename(columns=lambda x: re.sub('[^a-zA-Z0-9]', '_', x), inplace=True)
+        dataframe.rename(columns=lambda x: re.sub('__*', '_', x), inplace=True)
+        dataframe.columns = dataframe.columns.str.replace(' ', '_')
+        dataframe.columns = dataframe.columns.str.replace('-', '')
+        dataframe.columns = dataframe.columns.str.replace('5', '_5')
+        dataframe.columns = dataframe.columns.str.replace('.', '_')
+        dataframe.columns = dataframe.columns.str.replace('/', '_')
+        dataframe.columns = dataframe.columns.str.replace('__', '_')
+        dataframe.rename(columns={"loads": "impressions_analyzed"})
+        print("transformed.")
+        print(dataframe.shape)
+        dataframe.to_csv(str(table_name) + str(bq_append_string) + ".csv", index=False)
+        print("saved locally")
+        print("now sending to gcs")
+        upload_blob(bucket_name = "",
+        source_file_name = str(table_name) + str(bq_append_string) +".csv",
+        destination_blob_name = "brand_reporting/Criteo/" + str(table_name) + str(bq_append_string) +".csv")
+        print("setting up bq client")
+        client = bigquery.Client(project = '-dwh', credentials = credentialsFromVault)
+        print("bq client set")
+        dataset_ref = client.dataset(dataset_id)
+        job_config = bigquery.LoadJobConfig()
+        job_config.write_disposition = bigquery.WriteDisposition.WRITE_TRUNCATE # only writes if the table does not exist as a failsafe
+        job_config.schema = bq_schema
+        job_config.skip_leading_rows = 1
+        # The source format defaults to CSV, so the line below is optional.
+        job_config.source_format = bigquery.SourceFormat.CSV
+        uri = "gs:///Criteo/" + str(table_name) + str(bq_append_string) +".csv" 
+        print(job_config.__dict__)
+        try:
+            load_job = client.load_table_from_uri(
+                uri, dataset_ref.table(destination_table_name), job_config=job_config)
+                 # API request
+            print("Starting job {}".format(destination_table_name))
+            
+    
+            load_job.result()  # Waits for table load to complete.
+            print("Job finished.")
+    
+            destination_table = client.get_table(dataset_ref.table(destination_table_name))
+            print("Loaded {} rows".format(destination_table.num_rows), "to", dataset_id)
+        except Exception as e:
+            print(e)
+ 
+ 
+ 
+ 
+def upload_blob(bucket_name, source_file_name, destination_blob_name):
+    """Uploads a file to the bucket."""
+    # bucket_name = "your-bucket-name"
+    # source_file_name = "local/path/to/file"
+    # destination_blob_name = "storage-object-name"
+ 
+    storage_client = storage.Client(credentials = credentialsFromVault)
+    bucket = storage_client.bucket(bucket_name)
+    blob = bucket.blob(destination_blob_name)
+ 
+    blob.upload_from_filename(source_file_name)
+ 
+    print(
+        "File {} uploaded to {}.".format(
+            source_file_name, destination_blob_name
+        )
+    )    
+ 
+def get_local_campaign_files():
+    criteo_files = []
+    for filename in os.listdir(os.getcwd()):
+        if filename.endswith(".csv") and "campaign" in filename:
+            directory = os.getcwd()
+            directory = str(directory)
+            criteo_files.append(directory + "/" + filename)
+            continue
+        else:
+            continue
+    print(criteo_files)
+    return criteo_files
+    
+    
+def get_local_sku_files():
+    criteo_files = []
+    for filename in os.listdir(os.getcwd()):
+        if filename.endswith(".csv") and "sku" in filename:
+            directory = os.getcwd()
+            directory = str(directory)
+            criteo_files.append(directory + "/" + filename)
+            continue
+        else:
+            continue
+    print(criteo_files)
+    return criteo_files
+    
+    
+accounts  = [
+{"accountId":"", "name":"CLIENT REGION"}]
+ 
+pd_CRITEO_campaign_schema = {
+"CampaignID" : "str",
+"CampaignName" : "str",
+"date" : "str",
+"Clicks" : "float64",
+"Spend": "float64",
+"Impressions" : "float64",
+"ClickTransactions": "float64",
+"ClickSalesUnits": "float64",
+"ClickRevenue": "float64",
+"Transactions": "float64",
+"SalesUnits": "float64",
+"Revenue": "float64",
+"Currency": "str",
+"accountName": "str"
+}
+ 
+ 
+pd_CRITEO_sku_schema = {
+"RetailerSKUID" : "str",
+"SKUName" : "str",
+"GTIN" : "str",
+"MPN" : "str",
+"CampaignID" : "str",
+"CampaignName" : "str",
+"Clicks" : "float64",
+"Spend": "float64",
+"Impressions" : "float64",
+"ClickTransactions": "float64",
+"ClickSalesUnits": "float64",
+"ClickRevenue": "float64",
+"Transactions": "float64",
+"SalesUnits": "float64",
+"Revenue": "float64",
+"Currency": "str",
+"accountName": "str",
+"date" : "str"
+}
+ 
+bq_CRITEO_sku_schema = [bigquery.SchemaField("RetailerSKUID", "STRING"),
+bigquery.SchemaField("SKUName", "STRING"),
+bigquery.SchemaField("GTIN", "FLOAT"),
+bigquery.SchemaField("MPN", "STRING"),
+bigquery.SchemaField("CampaignID", "STRING"),
+bigquery.SchemaField("CampaignName", "STRING"),
+bigquery.SchemaField("Clicks", "FLOAT"),
+bigquery.SchemaField("Spend", "FLOAT"),
+bigquery.SchemaField("Impressions", "FLOAT"),
+bigquery.SchemaField("ClickTransactions", "FLOAT"),
+bigquery.SchemaField("ClickSalesUnits", "FLOAT"),
+bigquery.SchemaField("ClickRevenue", "FLOAT"),
+bigquery.SchemaField("Transactions", "FLOAT"),
+bigquery.SchemaField("SalesUnits", "FLOAT"),
+bigquery.SchemaField("Revenue", "FLOAT"),
+bigquery.SchemaField("Currency", "STRING"),
+bigquery.SchemaField("accountName", "STRING"),
+bigquery.SchemaField("date", "STRING")]
+ 
+bq_CRITEO_campaign_schema = [bigquery.SchemaField("CampaignID", "STRING"),
+bigquery.SchemaField("CampaignName", "STRING"),
+bigquery.SchemaField("date", "STRING"),
+bigquery.SchemaField("Clicks", "FLOAT"),
+bigquery.SchemaField("Spend", "FLOAT"),
+bigquery.SchemaField("Impressions", "FLOAT"),
+bigquery.SchemaField("ClickTransactions", "FLOAT"),
+bigquery.SchemaField("ClickSalesUnits", "FLOAT"),
+bigquery.SchemaField("ClickRevenue", "FLOAT"),
+bigquery.SchemaField("Transactions", "FLOAT"),
+bigquery.SchemaField("SalesUnits", "FLOAT"),
+bigquery.SchemaField("Revenue", "FLOAT"),
+bigquery.SchemaField("Currency", "STRING"),
+bigquery.SchemaField("accountName", "STRING")]
+from google.cloud import storage, bigquery
+"""
+
+ 
+Support:
+    Swagger Docs: https://rm-api.criteo.com/retailmedia/
+    Support Docs: https://support.criteo.com/s/article?article=Retail-Media-API-Guide-V1-0&language=en_US
+ 
+"""
+ 
+import requests
+import logging
+import os
+import time
+ 
+ 
+ 
+class CriteoRetailAPI(object):
+    """
+    Wrapper for Criteo retail API.
+    
+    Args:
+        client_id (str, optional): client_id provided by platform. Can be passed explicitly or loaded from $CRITEO_CLIENT_ID
+        client_secret (str, optional): client_secret provided by platform. Can be passed explicitly or loaded from $CRITEO_CLIENT_SECRET
+        
+    Attributes:
+        token (str): initialized to none, set after getAccessToken method is called.
+        access_token_expiration (int): initialized to none, set after getAccessToken method is called.
+        host (str): API host
+        
+    """
+    
+    host =
+    
+    def __init__(self,client_id=None,client_secret=None):
+        if client_id:
+            self.client_id = client_id
+        elif os.environ['CRITEO_CLIENT_ID']:
+            self.client_id = os.environ['CRITEO_CLIENT_ID']
+        else:
+            raise Exception("Client ID not passed and not found under CRITEO_CLIENT_ID env-var")
+            
+        if client_secret:
+            self.client_secret = client_secret
+        elif os.environ['CRITEO_CLIENT_SECRET']:
+            self.client_secret = os.environ['CRITEO_CLIENT_SECRET']
+        else:
+            raise Exception("Client Secret not passed and not found under CRITEO_CLIENT_SECRET env-var")
+ 
+        self.token = None
+        self.access_token_expiration = None
+        
+    def getAccessToken(self):
+        """
+        Gets JWT token. Sets token & access_token_expiration attributes if successful,
+        
+        """
+        
+        endpoint = "/oauth2/token"
+        token_body = {
+            'client_id': self.client_id, 
+            'client_secret': self.client_secret,
+            'grant_type':"client_credentials"
+        }
+        try:
+            resp = requests.post(self.host+endpoint,data=token_body)
+            resp.raise_for_status()
+        except Exception as e:
+            print(e)
+            self.token = self.token_expiration = None
+        else:
+            self.token = resp.json()['access_token']
+            self.access_token_expiration = time.time() + resp.json()["expires_in"] * .95 # add a little margin to expiration time
+    
+    class Decorators():
+        @staticmethod
+        def refreshToken(decorated):
+            """
+            Decorator to get new token if expired or if token not set.
+ 
+            """
+            def wrapper(api,*args,**kwargs):
+                if not api.token:
+                    api.getAccessToken()
+                elif time.time() > api.access_token_expiration:
+                    api.getAccessToken()
+                return decorated(api,*args,**kwargs)
+            return wrapper
+    
+    
+    @Decorators.refreshToken
+    def getAccounts(self):
+        """
+        Lists account IDs for a given user account (token)
+        
+        returns:
+            response (json): accounts associated with API credentials
+        
+        """
+        endpoint = "/v1/accounts"
+        headers = {"Authorization": f"Bearer {self.token}"}
+        
+        try:
+            resp = requests.get(self.host+endpoint,headers=headers)
+            resp.raise_for_status()
+        except Exception as e:
+            print(e)
+            return None
+        else:
+            return resp.json()
+    
+    @Decorators.refreshToken    
+    def getCampaigns(self,account_id):
+        """
+        Lists campaigns for a given account
+        
+        args:
+            account_id (str): hashed account id (aka: external account id)
+        
+        returns:
+            response (json): campaigns associated with account id
+        
+        """
+        endpoint = f"/v1/account/{account_id}/campaigns"
+        headers = {"Authorization": f"Bearer {self.token}"}
+        
+        try:
+            resp = requests.get(self.host+endpoint,headers=headers)
+            resp.raise_for_status()
+        except Exception as e:
+            print(e)
+            return None
+        else:
+            return resp.json()
+        
+    @Decorators.refreshToken    
+    def getCampaign(self,account_id,campaign_id):
+        """
+        Gets individual campaign for a given account
+        
+        args:
+            account_id (str): hashed account id (aka: external account id)
+            campaign_id (str): hashed campaign id (aka: external account id)
+        
+        returns:
+            response (json): campaign summary report
+        
+        """
+        endpoint = f"/v1/account/{account_id}/campaigns/{campaign_id}"
+        headers = {"Authorization": f"Bearer {self.token}"}
+        
+        try:
+            resp = requests.get(self.host+endpoint,headers=headers)
+            resp.raise_for_status()
+        except Exception as e:
+            print(e)
+            return None
+        else:
+            return resp.json()
+        
+    @Decorators.refreshToken    
+    def getCampaignActivityByDay(self,account_id,date_from,date_to,time_zone='UTC'):
+        """
+        Gets Campaign activity by day for date_from - date_to.
+        Note: maximum window size is 31 days 
+        
+        args:
+            account_id (str): hashed account id (aka: external account id)
+            date_from (str): yyyy-mm-dd
+            date_to (str): yyyy-mm-dd
+            time_zone (str): UTC
+        
+        returns:
+            response (json): campaign activity report by day report
+        
+        """
+        
+        endpoint = f"/v1/account/{account_id}/campaign-activity-by-day"
+        headers = {"Authorization": f"Bearer {self.token}"}
+        params = {            
+            'dateFrom':date_from,
+            'dateTo':date_to,
+            'timeZone':time_zone
+        }
+        
+        try:
+            resp = requests.get(self.host+endpoint,headers=headers,params=params)
+            resp.raise_for_status()
+        except Exception as e:
+            print(e)
+            return None
+        else:
+            return resp.json()
+        
+        
+    @Decorators.refreshToken    
+    def getActivityBySKU(self,account_id,date_from,date_to,time_zone='UTC'):
+        """
+        Gets Activity by SKU for date_from - date_to.
+        Note: maximum window size is 31 days 
+        
+        args:
+            account_id (str): hashed account id (aka: external account id)
+            date_from (str): yyyy-mm-dd
+            date_to (str): yyyy-mm-dd
+            time_zone (str): UTC
+        
+        returns:
+            API response (json)
+        
+        """
+        
+        endpoint = f"/v1/account/{account_id}/activity-by-sku"
+        headers = {"Authorization": f"Bearer {self.token}"}
+        params = {
+            'dateFrom':date_from,
+            'dateTo':date_to,
+            'timeZone':time_zone
+        }
+        
+        try:
+            resp = requests.get(self.host+endpoint,headers=headers,params=params)
+            resp.raise_for_status()
+        except Exception as e:
+            print(e)
+            return None
+        else:
+            return resp.json()
+    
+    @Decorators.refreshToken 
+    def getProductGroups(self,account_id,campaign_id):
+        endpoint = f"/v1/account/{account_id}/campaigns/{campaign_id}/product-groups"
+        headers = {"Authorization": f"Bearer {self.token}"}
+        params = {
+            'dateFrom':date_from,
+            'dateTo':date_to,
+            'timeZone':time_zone
+        }
+        
+        try:
+            resp = requests.get(self.host+endpoint,headers=headers,params=params)
+            resp.raise_for_status()
+        except Exception as e:
+            print(e)
+            return None
+        else:
+            return resp.json()
+        
+logging.basicConfig()
+logging.getLogger().setLevel(logging.INFO)
+#requests_log = logging.getLogger("requests.packages.urllib3")
+#requests_log.setLevel(logging.DEBUG)
+#requests_log.propagate = True
+## Authentication
+os.environ['CRITEO_CLIENT_ID'] = "rma-4bfe7149-916e-4baa-8e89-dadd680bb332"
+os.environ['CRITEO_CLIENT_SECRET'] = "S_@(3p;^d]kk"
+ 
+c = CriteoRetailAPI()
+ 
+ 
+from datetime import datetime, timedelta
+end_date = datetime.today()
+start_date = end_date - timedelta(days=7)
+start_date = start_date.strftime('%Y-%m-%d')
+end_date = end_date.strftime('%Y-%m-%d')
+bq_append_string = "_" + end_date.replace("-","")
+ 
+ 
+def get_campaign_reporting_week(start, end):
+    dfs = []
+    count=0
+    for count,account in enumerate(na_accounts):
+        if count+1 % 5 == 0:
+            time.sleep(20)
+            print(f"Req:{count} - Sleep for Rate Limit")
+        accountId, accountName = account.values()
+        print(f"Fetch Frontend Data for {accountName} Campaigns")
+        rep = c.getCampaignActivityByDay(account_id=accountId,date_from=start,date_to=end)
+        df = pd.DataFrame(rep['data'],columns=rep['columns'])
+        df['accountName'] = accountName ## add account name for country ID
+        dfs.append(df)
+    campaign_combined = pd.concat(dfs)
+    campaign_combined.to_csv('CRITEO_campaign.csv', index=False)
+    
+    
+get_campaign_reporting_week(str(start_date), str(end_date)) 
+criteo_campaign_files = get_local_campaign_files()
+ 
+print(criteo_campaign_files)
+ 
+project = "eh"
+dataset_id = "DWeo" # this should not change
+table_name = "CRn" # this should not change
+destination_table_name = table_name + bq_append_string # this should not change
+df_to_bq(table_name, bq_append_string, criteo_campaign_files, dataset_id, destination_table_name, pd_CRITEO_campaign_schema, bq_CRITEO_campaign_schema)
+ 
+ 
+ 
+import requests
+import logging
+import os
+import time
+import base64
+import re
+import pandas as pd
+from google.cloud import storage, bigquery
+logging.basicConfig()
+logging.getLogger().setLevel(logging.INFO)
+#requests_log = logging.getLogger("requests.packages.urllib3")
+#requests_log.setLevel(logging.DEBUG)
+#requests_log.propagate = True
+## Authentication
+os.environ['CRITEO_CLIENT_ID'] = 
+os.environ['CRITEO_CLIENT_SECRET'] = 
+ 
+c = CriteoRetailAPI()
+ 
+ 
+ 
+from datetime import datetime, timedelta
+days = 7
+end_date = datetime.today()
+reporting_days = [end_date - timedelta(days=x) for x in range(days)]
+reporting_days = [ x.strftime('%Y-%m-%d') for x in reporting_days]
+start_date = end_date - timedelta(days=days)
+start_date = start_date.strftime('%Y-%m-%d')
+end_date = end_date.strftime('%Y-%m-%d')
+bq_append_string = "_" + end_date.replace("-","")
+ 
+ 
+def get_sku_reporting_week(start, end):
+    sku_dfs = []
+    for count, account in enumerate(na_accounts):
+        accountId, accountName = account.values()
+        print(f"Getting SKU Data for {accountName}") 
+        for n, day in enumerate(reporting_days):
+            print(f"Getting SKU Data for Date: {day}")
+            if (n+1) % 5 == 0:
+                print(f"Req:{n} - Sleep for Rate Limit")
+                time.sleep(15)
+            rep = c.getActivityBySKU(accountId,day,day,'UTC')
+            try:
+                df = pd.DataFrame(rep['data'],columns=rep['columns'])
+                df['accountName'] = accountName
+                df['date'] = day
+                sku_dfs.append(df)
+            except:
+                print(f"issue w/ {accountName} & {day}")
+    sku_df = pd.concat(sku_dfs)
+    sku_df.to_csv("CRITEO_sku.csv",index=False)
+    
+    
+get_sku_reporting_week(str(start_date), str(end_date)) 
+criteo_sku_files = get_local_sku_files()
+ 
+print(criteo_sku_files)
+ 
+project = "essence-rtf-goog-dwh"
+dataset_id = "" # this should not change
+table_name = "" # this should not change
+destination_table_name = table_name + bq_append_string # this should not change
+df_to_bq(table_name, bq_append_string, criteo_sku_files, dataset_id, destination_table_name, pd_CRITEO_sku_schema, bq_CRITEO_sku_schema)
+ 
+ 
+ 
+ 
+ 
+ 
+directory = os.listdir()
+ 
+for path in directory:
+    if path.endswith(".csv") or path.endswith(".xlsx"):
+        os.remove(path)
