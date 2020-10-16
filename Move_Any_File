@@ -1,0 +1,112 @@
+import pandas as pd
+from google.oauth2.credentials import Credentials
+# get client credentials somehow
+import warnings
+warnings.filterwarnings('ignore')
+
+path_to_file = ""
+
+df = pd.read_excel(path_to_file) # assumes excel file, but could be other
+file_date = max(df['date']).strftime("%Y%m%d")
+df.to_csv(filename,index=False)
+
+from google.cloud import storage
+gcs_client = storage.Client(credentials = credentialsFromVault)
+bucket = gcs_client.get_bucket('')
+blob = bucket.blob(f"uri{filename}")
+blob.upload_from_filename(filename)
+print(blob)
+uri = f"gs://{blob.bucket.name}/{blob.name}"
+print(f"File Stored @ \n{uri}")
+
+from google.cloud import bigquery as bq
+
+# make schema
+
+job_config = bq.LoadJobConfig()
+job_config.write_disposition = bq.WriteDisposition.WRITE_TRUNCATE # WRITES OR OVERWRITES EXISTINGsafe
+job_config.schema = moat_schema
+job_config.skip_leading_rows = 1
+job_config.source_format = bq.SourceFormat.CSV
+
+
+from google.cloud import bigquery
+
+# Construct a BigQuery client object.
+client = bigquery.Client(credentials=credentialsFromVault)
+
+table_name = os.path.splitext(filename)[0] # remove file extension
+table_name = table_name 
+table_id = f'essence-rtf-goog-dwh.DWH_Moat.{table_name}' + "_temp"
+
+
+job_config.schema = schema
+job_config.allow_jagged_rows = True
+
+
+uri = f"gs://{blob.bucket.name}/{blob.name}"
+
+load_job = client.load_table_from_uri(
+    uri,
+    table_id,
+    job_config=job_config
+)  
+
+load_job.result()  # Waits for the job to complete.
+
+destination_table = client.get_table(table_id)
+print("Loaded {} rows.".format(destination_table.num_rows))
+
+
+tbl = bq_client.get_table(table_id)
+tbl.modified.strftime("%Y-%m-%d @ %H:%M UTC")
+
+
+os.remove(path_to_file) # delete excel
+os.remove(filename) # delete csv
+
+
+
+from google.cloud import bigquery
+import pandas as pd
+client = bigquery.Client(credentials=credentialsFromVault)
+job_config = bigquery.QueryJobConfig()
+
+# essence=rtf-goog-dwh.DWH_Moat.Moat_All_*
+# essence-rtf-goog-dwh.DWH_Moat.Moat_Social_*
+
+sql = """
+   MERGE
+  `` T
+USING
+ () S
+ON
+  FARM_FINGERPRINT(  CONCAT( 
+  
+          ifnull(T.FIELD, "NULL"),
+          
+          )) = FARM_FINGERPRINT(  CONCAT( 
+          IFNULL(S.FIELD, "NULL")
+          ),
+
+          
+          ))
+
+WHEN NOT MATCHED
+  THEN
+INSERT
+ROW
+"""
+# Start the query, passing in the extra configuration.
+query_job = client.query(
+sql,
+# Location must match that of the dataset(s) referenced in the query
+# and of the destination table.
+location="US",
+job_config=job_config,
+)  # API request - starts the query
+
+result = query_job.result()  # Waits for the query to finish
+print(query_job.__dict__)
+
+
